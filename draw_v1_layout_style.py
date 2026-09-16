@@ -37,8 +37,9 @@ with schemdraw.Drawing(file="web/v1_schematic_layout.png", dpi=130, show=False) 
     mid = (8, esp.absanchors["D34"][1])
 
     # 右侧立链：3.3V 轨 — FSR — ●(D34) — 10k — GND 轨
-    d += elm.ResistorVar().at((8, -4.5)).toy(mid[1]).label("FSR", loc="bottom")
+    # endpoints() 显式钉死两端坐标（.toy() 对 2 端子元件有渲染偏移，曾致 FSR 悬空）
+    d += elm.ResistorVar().endpoints((8, -5.5), mid).label("FSR", loc="bottom")
     d += elm.Dot().at(mid)
-    d += elm.Resistor().at(mid).toy(-0.5).label("10kΩ", loc="bottom")
-    d += elm.Line().at((8, -0.5)).toy(0)
+    d += elm.Resistor().endpoints(mid, (8, -0.3)).label("10kΩ", loc="bottom")
+    d += elm.Line().at((8, -0.3)).toy(0)
     d += elm.Dot()
