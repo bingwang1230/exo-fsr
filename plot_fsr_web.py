@@ -47,21 +47,26 @@ def reader():
 
 threading.Thread(target=reader, daemon=True).start()
 
-# 页面：1 秒自动刷新
+# 页面：JS 快速拉图（300ms）+ 防缓存（避免 meta refresh 整页刷新 + 图片缓存的 1.5–2s 感知延迟）
 with open(os.path.join(WEB, "index.html"), "w") as f:
     f.write(
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<meta http-equiv='refresh' content='1'>"
         "<title>FSR 实时曲线</title></head>"
         "<body style='margin:0;background:#111;color:#eee;font-family:sans-serif'>"
         "<h3 style='margin:12px 16px'>FSR 实时曲线 · 按压传感器看起伏</h3>"
-        "<img src='curve.png' style='width:96vw'>"
+        "<img id='c' src='curve.png' style='width:96vw'>"
+        "<script>"
+        "setInterval(function(){"
+        "  var i=document.getElementById('c');"
+        "  i.src='curve.png?t='+Date.now();"
+        "},300);"
+        "</script>"
         "</body></html>"
     )
 
 fig, ax = plt.subplots(figsize=(10, 5), facecolor="#222")
 while True:
-    time.sleep(0.6)
+    time.sleep(0.25)
     ax.clear()
     ax.plot(list(xs), list(ys), lw=1.5, color="#ff5252")
     ax.set_facecolor("#222")
