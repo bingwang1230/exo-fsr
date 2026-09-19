@@ -1,0 +1,12 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V2 预演版 · 上下换位接线图</title></head>
+<body style="margin:0;background:#111;color:#eee;font-family:sans-serif;padding:16px">
+<h3>V2 预演版 · 上下换位（10k 上臂 / FSR 下臂）</h3>
+<img src="v2_swap_layout.png" style="width:96vw;max-width:900px;background:#fff">
+<div style="line-height:1.9;font-size:15px;margin-top:12px">
+<b>三查（换位版）</b><br>
+① 18 列三件套：FSR 脚 + 10k 脚 + 黄线 同一列，插实；<br>
+② FSR 上端 → <span style="color:#aaa">顶轨里行（GND）</span>；10k 下端 → <span style="color:#e55">顶轨外行（3.3V）</span>；别插到底部空轨；<br>
+③ 长轨中间有断点：插孔必须与黑线/红线在同一段（左右半边）。<br><br>
+<b>正常表现</b>：空载稳定 ≈4095 → 指压圆片读数往下掉（语义反转）。<br>
+若 0–4095 乱跳 = 中点悬空，优先重插黄线。
+</div></body></html>
