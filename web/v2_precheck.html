@@ -1,0 +1,11 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V2 桌面预检装配图 · SYB-170（330Ω 正式拓扑）</title></head>
+<body style="margin:0;background:#111;color:#eee;font-family:sans-serif;padding:16px">
+<h3>V2 桌面预检装配图 · 330Ω 上臂 / FSR 下臂（正式拓扑，反逻辑）</h3>
+<img src="v2_precheck_syb170.png" style="width:96vw;max-width:1100px;background:#fff">
+<div style="line-height:1.9;font-size:15px;margin-top:12px">
+<b>三查（插完先别上电，照图核一遍）</b><br>
+① 同列才导通：红线 + 330Ω 一脚同列；330Ω 另一脚 + FSR 一脚 + 黄线 同列（中点）；FSR 另一脚 + 深色线 同列——<b>全部插在上半区</b>（SYB-170 上下两半互不导通！）<br>
+② 上电预期：空载读数稳定 ≈4095；指压 FSR 圆片读数<b>往下掉</b>（反逻辑，对照预习课 §3 数值表）＝预检通过；0–4095 乱跳＝中点悬空，先重插黄线<br>
+③ 预检通过后：SYB-170 背胶贴充电宝；上鞋时 FSR 从板上拔下，改用 1m 杜邦延长（中点列、GND 列各一根接到 FSR 两脚）<br><br>
+<b>看波形</b>：<code>python3 plot_fsr_web.py</code> → 浏览器 <code>http://localhost:8324/</code>（5 秒滚动窗）
+</div></body></html>
