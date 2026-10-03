@@ -31,7 +31,6 @@ except Exception:
     pass
 
 conn = [-1]          # 当前连接句柄；-1 = 未连接
-ble.irq(_irq)      # 2026-10-03 首刷遇漏：忘了挂 IRQ，连接后 conn 恒 -1、notify 一条不发
 
 def _irq(ev, data):
     if ev == _IRQ_CENTRAL_CONNECT:
@@ -49,6 +48,7 @@ def _advertise():
     payload = bytes([0x02, 0x01, 0x06, len(NAME) + 1, 0x09]) + NAME
     ble.gap_advertise(100_000, adv_data=payload)   # 100ms 间隔
 
+ble.irq(_irq)   # 必须在 _irq 定义之后挂（首刷曾漏挂：连接后 notify 零发送；二刷曾挂错位置：开机 NameError）
 _advertise()
 
 # ---- 采样主循环（USB/BLE 双发）----
