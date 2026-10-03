@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 v5（pyserial 读线程 + canvas 页面）。
+"""FSR live 波形页 v7（serial / BLE 双数据源 + canvas 页面 + 录制）。
 
 MBP 上运行：python3 /tmp/fsr_live.py  → 浏览器 http://localhost:8324/
-- 串口：自动探测 /dev/cu.usbserial*（换 USB 口编号会变），stty 配 115200 后
+- 串口（默认）：自动探测 /dev/cu.usbserial*，stty 配 115200 后（换 USB 口编号会变），stty 配 115200 后
   select 非阻塞读 + 手动拼行（v1 的 readline 会卡死，缓冲区只剩 1 点）。
+- BLE（--ble）：bleak 扫描广播名 "exo-fsr"（Nordic UART Service TX，与固件 main.py 同 UUID）
+  → 连接 → 订阅 notify，行格式与串口完全同；断线/断流自动重扫重连。
+  依赖：pip3 install bleak（串口模式另需 pyserial）。
 - 页面：canvas 滚动曲线 + 大号当前值 + 窗口 min/max + 实时数据率。
 - 自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
 """
@@ -90,6 +93,27 @@ STATS = {"opens": 0, "chunks": 0, "bytes": 0, "stalls": 0, "last_chunk": 0.0}
 RAW = collections.deque(maxlen=4)
 
 
+def feed_line(s, buf):
+    """串口/BLE 共用：一行 "ms,raw" → 最新值进 buf + 录制落盘。"""
+    if len(RAW) == 0 or RAW[-1] != s:
+        RAW.append(s[:40])
+    if "," in s:
+        p = s.split(",")[1]
+        if p.isdigit():
+            buf.append((time.time(), int(p)))
+            if REC["file"] is not None:
+                REC["file"].write(s + "\n")
+                REC["count"] += 1
+
+
+def split_chunks(pending, buf):
+    """字节流 → 按行喂 feed_line，返回剩余不完整行。"""
+    while b"\n" in pending:
+        line, pending = pending.split(b"\n", 1)
+        feed_line(line.decode("utf-8", "ignore").strip(), buf)
+    return pending
+
+
 def reader(buf):
     import serial as pyserial  # macOS CH340：必须 IOSSIOSPEED（pyserial），stty 不生效
     while True:
@@ -111,19 +135,7 @@ def reader(buf):
                     STATS["chunks"] += 1
                     STATS["bytes"] += len(chunk)
                     STATS["last_chunk"] = time.time()
-                    pending += chunk
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
-                        s = line.decode("utf-8", "ignore").strip()
-                        if len(RAW) == 0 or RAW[-1] != s:
-                            RAW.append(s[:40])
-                        if "," in s:
-                            p = s.split(",")[1]
-                            if p.isdigit():
-                                buf.append((time.time(), int(p)))
-                                if REC["file"] is not None:
-                                    REC["file"].write(s + "\n")
-                                    REC["count"] += 1
+                    pending = split_chunks(pending + chunk, buf)
                 elif time.time() - STATS["last_chunk"] > 3.0:
                     STATS["stalls"] += 1
                     raise OSError("stall watchdog: reopen")
@@ -135,6 +147,46 @@ def reader(buf):
                 except Exception:
                     pass
             time.sleep(1)
+
+
+def ble_main(buf):
+    """BLE 数据源：事件循环独占线程，扫描→连接→notify→断线重连。"""
+    import asyncio
+
+    async def run():
+        from bleak import BleakClient, BleakScanner
+
+        TX = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  # NUS TX，与固件一致
+        while True:
+            try:
+                log("ble: scanning for exo-fsr ...")
+                dev = await BleakScanner.find_device_by_name("exo-fsr", timeout=10)
+                if dev is None:
+                    STATS["stalls"] += 1
+                    continue
+                log("ble: connecting " + str(dev.address))
+                async with BleakClient(dev, timeout=15) as client:
+                    log("ble: connected")
+                    STATS["opens"] += 1
+                    STATS["last_chunk"] = time.time()
+                    state = {"pending": b""}
+
+                    def on_notify(_h, data):
+                        STATS["chunks"] += 1
+                        STATS["bytes"] += len(data)
+                        STATS["last_chunk"] = time.time()
+                        state["pending"] = split_chunks(state["pending"] + bytes(data), buf)
+
+                    await client.start_notify(TX, on_notify)
+                    while client.is_connected and time.time() - STATS["last_chunk"] < 5.0:
+                        await asyncio.sleep(0.5)
+                    log("ble: link lost or stalled, will rescan")
+                    STATS["stalls"] += 1
+            except Exception as e:
+                log("ble error: %r" % e)
+            await asyncio.sleep(1)  # 重连退避
+
+    asyncio.run(run())
 
 
 REC = {"file": None, "count": 0}
@@ -193,8 +245,9 @@ def serve(buf):
 
 def main():
     buf = collections.deque(maxlen=3000)
-    threading.Thread(target=reader, args=(buf,), daemon=True).start()
-    log("server starting on %d" % HTTP_PORT)
+    use_ble = "--ble" in sys.argv[1:]
+    threading.Thread(target=ble_main if use_ble else reader, args=(buf,), daemon=True).start()
+    log("server starting on %d (source: %s)" % (HTTP_PORT, "ble" if use_ble else "serial"))
     serve(buf)
 
 
