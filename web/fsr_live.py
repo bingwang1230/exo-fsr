@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""FSR live 波形页 v5（pyserial 读线程 + canvas 页面）。
+
+MBP 上运行：python3 /tmp/fsr_live.py  → 浏览器 http://localhost:8324/
+- 串口：自动探测 /dev/cu.usbserial*（换 USB 口编号会变），stty 配 115200 后
+  select 非阻塞读 + 手动拼行（v1 的 readline 会卡死，缓冲区只剩 1 点）。
+- 页面：canvas 滚动曲线 + 大号当前值 + 窗口 min/max + 实时数据率。
+- 自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
+"""
+
+import collections
+import glob
+import http.server
+import json
+import os
+import select
+import subprocess
+import sys
+import threading
+import time
+
+DEV_CANDIDATES = "/dev/cu.usbserial*"
+HTTP_PORT = 8324
+LOG = "/tmp/fsr_live.log"
+
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V2 预检</title>
+<style>body{margin:0;background:#111;color:#eee;font-family:sans-serif}
+#cur{font-size:64px;font-weight:bold;color:#ffd42a}
+#meta{font-size:14px;color:#aaa;line-height:1.7}</style></head>
+<body>
+<div id="cur">--</div>
+<canvas id="cv" width="1200" height="400" style="width:99vw"></canvas>
+<div id="meta">连接中…</div>
+<script>
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+let data=[];
+function draw(){
+ ctx.fillStyle='#111';ctx.fillRect(0,0,cv.width,cv.height);
+ [4095,3072,2048,1024,0].forEach(v=>{
+  const y=cv.height-(v/4095)*cv.height;
+  ctx.strokeStyle=v==2048?'#555':'#333';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cv.width,y);ctx.stroke();
+  ctx.fillStyle='#666';ctx.font='12px sans-serif';ctx.fillText(v,4,y-3);});
+ if(!data.length)return;
+ const t1=Date.now()/1000,t0=t1-6;
+ ctx.strokeStyle='#ffd42a';ctx.lineWidth=2;ctx.beginPath();
+ let started=false;
+ data.forEach(p=>{
+  if(p[0]===t0)return;
+  const x=((p[0]-t0)/6)*cv.width,y=cv.height-(p[1]/4095)*cv.height;
+  if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);});
+ ctx.stroke();
+}
+async function tick(){
+ try{const r=await fetch('/data');data=await r.json();
+  const cur=data[data.length-1];
+  const now=Date.now()/1000;
+  const last1s=data.filter(p=>now-p[0]===0?false:(now-p[0])<1).length;
+  if(cur)document.getElementById('cur').textContent=cur[1];
+  const vals=data.map(p=>p[1]);
+  document.getElementById('meta').innerHTML=
+   '数据率 '+last1s+' 点/s（应≈100）｜窗口6s min='+Math.min(...vals)+' max='+Math.max(...vals)+
+   '（当前 '+cur[1]+'）｜V2 反逻辑：空载≈4095，受压读数<b>下掉</b>';
+ }catch(e){document.getElementById('meta').textContent='服务未响应：'+e;}
+ draw();
+}
+setInterval(tick,300);tick();
+</script></body></html>"""
+
+
+def log(msg):
+    try:
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+
+
+STATS = {"opens": 0, "chunks": 0, "bytes": 0, "stalls": 0, "last_chunk": 0.0}
+
+
+RAW = collections.deque(maxlen=4)
+
+
+def reader(buf):
+    import serial as pyserial  # macOS CH340：必须 IOSSIOSPEED（pyserial），stty 不生效
+    while True:
+        ser = None
+        try:
+            dev = (sorted(glob.glob(DEV_CANDIDATES)) or [None])[0]
+            if not dev:
+                log("no serial device, retrying")
+                time.sleep(2)
+                continue
+            log("opening " + dev)
+            ser = pyserial.Serial(dev, 115200, timeout=0.5)
+            STATS["opens"] += 1
+            STATS["last_chunk"] = time.time()
+            pending = b""
+            while True:
+                chunk = ser.read(4096)
+                if chunk:
+                    STATS["chunks"] += 1
+                    STATS["bytes"] += len(chunk)
+                    STATS["last_chunk"] = time.time()
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        s = line.decode("utf-8", "ignore").strip()
+                        if len(RAW) == 0 or RAW[-1] != s:
+                            RAW.append(s[:40])
+                        if "," in s:
+                            p = s.split(",")[1]
+                            if p.isdigit():
+                                buf.append((time.time(), int(p)))
+                elif time.time() - STATS["last_chunk"] > 3.0:
+                    STATS["stalls"] += 1
+                    raise OSError("stall watchdog: reopen")
+        except Exception as e:
+            log("reader error: %r" % e)
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+            time.sleep(1)
+
+
+def serve(buf):
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/dbg"):
+                st = dict(STATS)
+                st["now"] = time.time()
+                st["idle"] = round(time.time() - STATS["last_chunk"], 1)
+                st["points"] = len(buf)
+                st["raw"] = list(RAW)
+                body = json.dumps(st).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/data"):
+                body = json.dumps(list(buf)[-800:]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            else:
+                body = PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    http.server.HTTPServer(("127.0.0.1", HTTP_PORT), H).serve_forever()
+
+
+def main():
+    buf = collections.deque(maxlen=3000)
+    threading.Thread(target=reader, args=(buf,), daemon=True).start()
+    log("server starting on %d" % HTTP_PORT)
+    serve(buf)
+
+
+if __name__ == "__main__":
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        pid2 = os.fork()
+        if pid2 == 0:
+            try:
+                fd = os.open("/dev/null", os.O_RDWR)
+                os.dup2(fd, 0)
+                os.dup2(fd, 1)
+                os.dup2(fd, 2)
+                main()
+            except Exception as e:
+                log("fatal: %r" % e)
+        os._exit(0)
+    sys.exit(0)
