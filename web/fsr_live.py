@@ -240,7 +240,7 @@ def serve(buf):
         def log_message(self, *a):
             pass
 
-    http.server.HTTPServer(("127.0.0.1", HTTP_PORT), H).serve_forever()
+    http.server.HTTPServer((os.environ.get("FSR_HOST", "127.0.0.1"), HTTP_PORT), H).serve_forever()
 
 
 def main():
