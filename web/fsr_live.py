@@ -30,6 +30,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V2
 <body>
 <div id="cur">--</div>
 <canvas id="cv" width="1200" height="400" style="width:99vw"></canvas>
+<div style="margin:8px 0"><button id="rec" onclick="toggleRec()" style="font-size:18px;padding:6px 24px;background:#a02020;color:#fff;border:none;border-radius:6px">● 录制</button> <span id="recinfo" style="color:#aaa"></span></div>
 <div id="meta">连接中…</div>
 <script>
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
@@ -62,6 +63,14 @@ async function tick(){
    '（当前 '+cur[1]+'）｜V2 反逻辑：空载≈4095，受压读数<b>下掉</b>';
  }catch(e){document.getElementById('meta').textContent='服务未响应：'+e;}
  draw();
+}
+let recOn=false;
+async function toggleRec(){
+ recOn=!recOn;
+ const r=await fetch(recOn?'/rec/start':'/rec/stop');
+ const j=await r.json();
+ document.getElementById('rec').style.background=recOn?'#a02020':'#333';
+ document.getElementById('recinfo').textContent=j.file||'';
 }
 setInterval(tick,300);tick();
 </script></body></html>"""
@@ -112,6 +121,9 @@ def reader(buf):
                             p = s.split(",")[1]
                             if p.isdigit():
                                 buf.append((time.time(), int(p)))
+                                if REC["file"] is not None:
+                                    REC["file"].write(s + "\n")
+                                    REC["count"] += 1
                 elif time.time() - STATS["last_chunk"] > 3.0:
                     STATS["stalls"] += 1
                     raise OSError("stall watchdog: reopen")
@@ -125,10 +137,33 @@ def reader(buf):
             time.sleep(1)
 
 
+REC = {"file": None, "count": 0}
+
+
 def serve(buf):
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path.startswith("/dbg"):
+            if self.path.startswith("/rec/start"):
+                if REC["file"] is None:
+                    import datetime
+                    name = os.path.join(os.path.expanduser("~/code/exo-fsr/data"),
+                                        datetime.datetime.now().strftime("v2_%Y%m%d_%H%M%S.csv"))
+                    REC["file"] = open(name, "w")
+                    REC["count"] = 0
+                body = json.dumps({"recording": True, "file": REC["file"].name}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/rec/stop"):
+                if REC["file"] is not None:
+                    REC["file"].close()
+                    n, name = REC["count"], REC["file"].name
+                    REC["file"] = None
+                    body = json.dumps({"recording": False, "file": name, "samples": n}).encode()
+                else:
+                    body = json.dumps({"recording": False, "file": None}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/dbg"):
                 st = dict(STATS)
                 st["now"] = time.time()
                 st["idle"] = round(time.time() - STATS["last_chunk"], 1)
