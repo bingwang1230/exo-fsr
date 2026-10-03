@@ -1,0 +1,12 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V2.6 双脚版装配图 · SYB-170（双通道 330Ω 正式拓扑）</title></head>
+<body style="margin:0;background:#111;color:#eee;font-family:sans-serif;padding:16px">
+<h3>V2.6 双脚版装配图 · 双通道分压（330Ω 上臂 / FSR 下臂，D34 左脚 · D35 右脚）</h3>
+<img src="v2_6_dual_fsr.png" style="width:96vw;max-width:1200px;background:#fff">
+<div style="line-height:1.9;font-size:15px;margin-top:12px">
+<b>图例</b>：红=3V3　黄=D34 左脚中点　绿=D35 右脚中点　深蓝=GND（用 ESP32 两只 GND 脚）<br>
+<b>三查（插完先别上电，照图核一遍）</b><br>
+① 同列才导通：红 3V3 + 两支 330Ω 各一脚 <b>同列</b>（中列堆叠）；每片中点列 = 330Ω 另一脚 + FSR 一脚 + 黄/绿线；每片 GND 列 = FSR 另一脚 + 深色线——<b>全部插在上半区</b>（SYB-170 上下两半互不导通！）<br>
+② 上电预期（板载直插预检）：两片空载都稳 ≈4095；指压哪片<b>哪路下掉</b>（反逻辑）；任一路 0–4095 乱跳 = 该路中点悬空，重插该路黄/绿线<br>
+③ 上鞋：每片 FSR 两脚各接 1m 杜邦延长（中点色线 + GND 深色线，共 4 根）；FSR 贴鞋垫下<b>第一跖骨头位</b>（大脚趾根圆球正下，两脚镜像）；板贴充电宝收脚踝/口袋——单板双通道 = 双脚时间戳同源，重心转移可直接算<br><br>
+<b>看波形</b>：双通道固件与波形页升级中（AI 侧）；板载预检阶段先用现版 <code>fsr_live</code> 看单路（D34）
+</div></body></html>
