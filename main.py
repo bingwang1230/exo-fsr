@@ -31,6 +31,7 @@ except Exception:
     pass
 
 conn = [-1]          # 当前连接句柄；-1 = 未连接
+ble.irq(_irq)      # 2026-10-03 首刷遇漏：忘了挂 IRQ，连接后 conn 恒 -1、notify 一条不发
 
 def _irq(ev, data):
     if ev == _IRQ_CENTRAL_CONNECT:
