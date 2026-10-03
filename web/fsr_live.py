@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 · 零依赖版（无 pyserial/matplotlib）。
+"""FSR live 波形页 v5（pyserial 读线程 + canvas 页面）。
 
 MBP 上运行：python3 /tmp/fsr_live.py  → 浏览器 http://localhost:8324/
-stty 配好波特率后直读 /dev/cu.usbserial-110，HTTP 服务推 JSON，前端 canvas 画滚动曲线。
-自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
+- 串口：自动探测 /dev/cu.usbserial*（换 USB 口编号会变），stty 配 115200 后
+  select 非阻塞读 + 手动拼行（v1 的 readline 会卡死，缓冲区只剩 1 点）。
+- 页面：canvas 滚动曲线 + 大号当前值 + 窗口 min/max + 实时数据率。
+- 自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
 """
 
-import base64
 import collections
+import glob
 import http.server
 import json
 import os
+import select
 import subprocess
 import sys
 import threading
 import time
 
-DEV = "/dev/cu.usbserial-110"
+DEV_CANDIDATES = "/dev/cu.usbserial*"
 HTTP_PORT = 8324
 LOG = "/tmp/fsr_live.log"
 
@@ -27,34 +30,47 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V2
 <body>
 <div id="cur">--</div>
 <canvas id="cv" width="1200" height="400" style="width:99vw"></canvas>
-<div id="meta">V2 反逻辑：空载≈4095，受压读数<b>下掉</b>。窗口 6s 滚动，300ms 刷新。</div>
+<div style="margin:8px 0"><button id="rec" onclick="toggleRec()" style="font-size:18px;padding:6px 24px;background:#a02020;color:#fff;border:none;border-radius:6px">● 录制</button> <span id="recinfo" style="color:#aaa"></span></div>
+<div id="meta">连接中…</div>
 <script>
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
 let data=[];
 function draw(){
  ctx.fillStyle='#111';ctx.fillRect(0,0,cv.width,cv.height);
- ctx.strokeStyle='#333';ctx.beginPath();ctx.moveTo(0,cv.height/2);ctx.lineTo(cv.width,cv.height/2);ctx.stroke();
- ctx.strokeStyle='#666';[4095,3072,2048,1024,0].forEach(v=>{
-  const y=cv.height-(v/4095)*cv.height;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cv.width,y);ctx.stroke();
-  ctx.fillStyle='#555';ctx.font='12px sans-serif';ctx.fillText(v,4,y-3);ctx.fillStyle='#555';});
+ [4095,3072,2048,1024,0].forEach(v=>{
+  const y=cv.height-(v/4095)*cv.height;
+  ctx.strokeStyle=v==2048?'#555':'#333';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cv.width,y);ctx.stroke();
+  ctx.fillStyle='#666';ctx.font='12px sans-serif';ctx.fillText(v,4,y-3);});
  if(!data.length)return;
  const t1=Date.now()/1000,t0=t1-6;
  ctx.strokeStyle='#ffd42a';ctx.lineWidth=2;ctx.beginPath();
- data.forEach((p,i)=>{
+ let started=false;
+ data.forEach(p=>{
+  if(p[0]===t0)return;
   const x=((p[0]-t0)/6)*cv.width,y=cv.height-(p[1]/4095)*cv.height;
-  i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);});
  ctx.stroke();
 }
 async function tick(){
  try{const r=await fetch('/data');data=await r.json();
   const cur=data[data.length-1];
+  const now=Date.now()/1000;
+  const last1s=data.filter(p=>now-p[0]===0?false:(now-p[0])<1).length;
   if(cur)document.getElementById('cur').textContent=cur[1];
   const vals=data.map(p=>p[1]);
-  const mn=Math.min(...vals),mx=Math.max(...vals);
   document.getElementById('meta').innerHTML=
-   '窗口 min='+mn+' max='+mx+'（当前 '+cur[1]+'）｜V2 反逻辑：空载≈4095，受压读数<b>下掉</b>｜窗口 6s，300ms 刷新';
- }catch(e){}
+   '数据率 '+last1s+' 点/s（应≈100）｜窗口6s min='+Math.min(...vals)+' max='+Math.max(...vals)+
+   '（当前 '+cur[1]+'）｜V2 反逻辑：空载≈4095，受压读数<b>下掉</b>';
+ }catch(e){document.getElementById('meta').textContent='服务未响应：'+e;}
  draw();
+}
+let recOn=false;
+async function toggleRec(){
+ recOn=!recOn;
+ const r=await fetch(recOn?'/rec/start':'/rec/stop');
+ const j=await r.json();
+ document.getElementById('rec').style.background=recOn?'#a02020':'#333';
+ document.getElementById('recinfo').textContent=j.file||'';
 }
 setInterval(tick,300);tick();
 </script></body></html>"""
@@ -68,39 +84,106 @@ def log(msg):
         pass
 
 
+STATS = {"opens": 0, "chunks": 0, "bytes": 0, "stalls": 0, "last_chunk": 0.0}
+
+
+RAW = collections.deque(maxlen=4)
+
+
 def reader(buf):
-    subprocess.run(["stty", "-f", DEV, "115200", "raw", "-crtscts", "-hupcl"])
+    import serial as pyserial  # macOS CH340：必须 IOSSIOSPEED（pyserial），stty 不生效
     while True:
+        ser = None
         try:
-            f = open(DEV, "rb")
+            dev = (sorted(glob.glob(DEV_CANDIDATES)) or [None])[0]
+            if not dev:
+                log("no serial device, retrying")
+                time.sleep(2)
+                continue
+            log("opening " + dev)
+            ser = pyserial.Serial(dev, 115200, timeout=0.5)
+            STATS["opens"] += 1
+            STATS["last_chunk"] = time.time()
+            pending = b""
             while True:
-                line = f.readline().decode("utf-8", "ignore").strip()
-                if "," in line:
-                    p = line.split(",")[1]
-                    if p.isdigit():
-                        buf.append((time.time(), int(p)))
+                chunk = ser.read(4096)
+                if chunk:
+                    STATS["chunks"] += 1
+                    STATS["bytes"] += len(chunk)
+                    STATS["last_chunk"] = time.time()
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        s = line.decode("utf-8", "ignore").strip()
+                        if len(RAW) == 0 or RAW[-1] != s:
+                            RAW.append(s[:40])
+                        if "," in s:
+                            p = s.split(",")[1]
+                            if p.isdigit():
+                                buf.append((time.time(), int(p)))
+                                if REC["file"] is not None:
+                                    REC["file"].write(s + "\n")
+                                    REC["count"] += 1
+                elif time.time() - STATS["last_chunk"] > 3.0:
+                    STATS["stalls"] += 1
+                    raise OSError("stall watchdog: reopen")
         except Exception as e:
             log("reader error: %r" % e)
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
             time.sleep(1)
+
+
+REC = {"file": None, "count": 0}
 
 
 def serve(buf):
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path.startswith("/data"):
+            if self.path.startswith("/rec/start"):
+                if REC["file"] is None:
+                    import datetime
+                    name = os.path.join(os.path.expanduser("~/code/exo-fsr/data"),
+                                        datetime.datetime.now().strftime("v2_%Y%m%d_%H%M%S.csv"))
+                    REC["file"] = open(name, "w")
+                    REC["count"] = 0
+                body = json.dumps({"recording": True, "file": REC["file"].name}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/rec/stop"):
+                if REC["file"] is not None:
+                    REC["file"].close()
+                    n, name = REC["count"], REC["file"].name
+                    REC["file"] = None
+                    body = json.dumps({"recording": False, "file": name, "samples": n}).encode()
+                else:
+                    body = json.dumps({"recording": False, "file": None}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/dbg"):
+                st = dict(STATS)
+                st["now"] = time.time()
+                st["idle"] = round(time.time() - STATS["last_chunk"], 1)
+                st["points"] = len(buf)
+                st["raw"] = list(RAW)
+                body = json.dumps(st).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/data"):
                 body = json.dumps(list(buf)[-800:]).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
             else:
                 body = PAGE.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *a):
             pass
