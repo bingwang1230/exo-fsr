@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 v8（serial / BLE 双源 · 双通道曲线 · 实时钟联动 + 录制）。
+"""FSR live 波形页 v9（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
 
 运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/
-- 数据格式：固件 V2.6 起每行 "毫秒数,左,右"（双通道；单通道旧行 "毫秒数,raw" 自动兼容）。
+- 数据格式（双格式自动兼容）：
+  · ASCII 行 "毫秒数,值[,值…]"（USB / V2.x 旧固件；单/双/四通道均可，通道数自适应）；
+  · 二进制帧 0xAA + struct('<IHHHH') + 校验和 1B = 14B（V3 前哨 4 通道 BLE：ms,左跟,左跖,右跟,右跖），
+    帧内校验和 + 值域双闸防误同步；混合解析器先抽帧再按行喂 ASCII，互不干扰。
 - 串口（默认）：自动探测 /dev/cu.usbserial*；macOS CH340 必须用 pyserial（IOSSIOSPEED）。
-- BLE（--ble）：bleak 扫描广播名 "exo-fsr"（Nordic UART Service TX）→ 连接 → 订阅 notify；
+- BLE（--ble)：bleak 扫描广播名 "exo-fsr"（Nordic UART Service TX）→ 连接 → 订阅 notify；
   断线/断流自动重扫重连。依赖：pip3 install bleak（串口另需 pyserial）。
-- 页面：双曲线滚动窗（左=金/黄线 D34，右=绿线 D35）+ 两路大号当前值 + 各路窗口 min/max
-  + 实时数据率 + **实时钟联动**：页首毫秒级时钟，x 轴下缘标墙上时钟（慢动作视频对齐用）。
-- 录制：页面按钮 → data/v2_*.csv，原样落固件行（ms,left,right）。
+- 页面：四曲线滚动窗（左跟=橙 D32/左跖=金 D34/右跟=青 D33/右跖=绿 D35，跖位续 V2.6 配色）
+  + 四路大号当前值 + 各路窗口 min/max + 实时数据率 + 实时钟联动（慢动作视频对齐用）。
+- 录制：页面按钮 → data/v2_*.csv，统一落 ASCII 行（ms,左跟,左跖,右跟,右跖）。
 - 自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
 """
 
@@ -18,6 +21,7 @@ import http.server
 import json
 import os
 import select
+import struct
 import subprocess
 import sys
 import threading
@@ -27,16 +31,17 @@ DEV_CANDIDATES = "/dev/cu.usbserial*"
 HTTP_PORT = 8324
 LOG = "/tmp/fsr_live.log"
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V2.6 双脚</title>
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V3 前哨 4ch</title>
 <style>body{margin:0;background:#111;color:#eee;font-family:sans-serif}
-#curL{font-size:56px;font-weight:bold;color:#ffd42a}
-#curR{font-size:56px;font-weight:bold;color:#3ecf6e;margin-left:48px}
-.lbl{font-size:14px;color:#aaa;margin-right:24px}
+.cur{font-size:44px;font-weight:bold;margin-left:28px}
+.lbl{font-size:14px;color:#aaa;margin-left:28px}
 #clk{font-size:20px;color:#7ec8ff;font-family:monospace;margin:2px 0 6px}
 #meta{font-size:14px;color:#aaa;line-height:1.7}</style></head>
 <body>
-<span class="lbl">左脚 D34</span><span id="curL">--</span>
-<span class="lbl" style="margin-left:48px">右脚 D35</span><span id="curR">--</span>
+<span class="lbl" style="color:#ff8c00">左跟 D32</span><span id="cur1" class="cur" style="color:#ff8c00">--</span>
+<span class="lbl" style="color:#ffd42a">左跖 D34</span><span id="cur2" class="cur" style="color:#ffd42a">--</span>
+<span class="lbl" style="color:#00bfff">右跟 D33</span><span id="cur3" class="cur" style="color:#00bfff">--</span>
+<span class="lbl" style="color:#3ecf6e">右跖 D35</span><span id="cur4" class="cur" style="color:#3ecf6e">--</span>
 <div id="clk"></div>
 <canvas id="cv" width="1200" height="400" style="width:99vw"></canvas>
 <div style="margin:8px 0"><button id="rec" onclick="toggleRec()" style="font-size:18px;padding:6px 24px;background:#a02020;color:#fff;border:none;border-radius:6px">● 录制</button> <span id="recinfo" style="color:#aaa"></span></div>
@@ -44,7 +49,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V2
 <script>
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
 let data=[];
-const COLS=['','#ffd42a','#3ecf6e'],NAMES=['','左','右'];
+const COLS=['','#ff8c00','#ffd42a','#00bfff','#3ecf6e'],NAMES=['','左跟','左跖','右跟','右跖'];
 setInterval(()=>{const d=new Date();document.getElementById('clk').textContent=
  '⏱ '+d.toLocaleTimeString('zh-CN',{hour12:false})+'.'+String(d.getMilliseconds()).padStart(3,'0');},99);
 function fmtClock(ts){const d=new Date(ts*1000);
@@ -76,11 +81,10 @@ async function tick(){
  try{const r=await fetch('/data');data=await r.json();
   const now=Date.now()/1000,cur=data[data.length-1];
   const last1s=data.filter(p=>now-p[0]<1).length;
-  if(cur){
-   document.getElementById('curL').textContent=cur[1];
-   document.getElementById('curR').textContent=cur.length>2?cur[2]:'—';}
-  let m='数据率 '+last1s+' 点/s（应≈70-100）｜窗口 6s';
   const nch=cur?cur.length-1:0;
+  for(let c=1;c<=4;c++)
+   document.getElementById('cur'+c).textContent=(cur&&c<=nch)?cur[c]:'—';
+  let m='数据率 '+last1s+' 点/s（应≈70-100）｜窗口 6s';
   for(let c=1;c<=nch;c++){
    const vals=data.map(p=>p[c]);
    m+='｜'+NAMES[c]+' min='+Math.min(...vals)+' max='+Math.max(...vals);}
@@ -115,7 +119,7 @@ RAW = collections.deque(maxlen=4)
 
 
 def feed_line(s, buf):
-    """串口/BLE 共用：一行 "ms,a[,b]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘。"""
+    """ASCII 行 "ms,a[,b…]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘（原样行）。"""
     if len(RAW) == 0 or RAW[-1] != s:
         RAW.append(s[:60])
     parts = s.split(",")
@@ -127,12 +131,40 @@ def feed_line(s, buf):
             REC["count"] += 1
 
 
-def split_chunks(pending, buf):
-    """字节流 → 按行喂 feed_line，返回剩余不完整行。"""
-    while b"\n" in pending:
-        line, pending = pending.split(b"\n", 1)
+def feed_frame(ms, lh, lm, rh, rm, buf):
+    """0xAA 二进制帧（V3 前哨 4ch BLE）→ buf + 录制统一落 ASCII 行。"""
+    buf.append((time.time(), lh, lm, rh, rm))
+    if REC["file"] is not None:
+        REC["file"].write(f"{ms},{lh},{lm},{rh},{rm}\n")
+        REC["count"] += 1
+
+
+def parse_chunk(pending, buf):
+    """混合解析：先抽 0xAA 二进制帧（BLE 4ch，帧尾校验和），剩余按行喂 ASCII（USB/旧固件），返回未完尾巴。
+    帧 = 0xAA + 12B 载荷 + 1B 校验和 = 14B；双闸 = 校验和 + 值域 ≤4095（单闸值域曾放出假帧，2026-10-05 单测）。"""
+    ascii_part = b""
+    while True:
+        i = pending.find(0xAA)
+        if i < 0:
+            ascii_part += pending
+            pending = b""
+            break
+        ascii_part += pending[:i]
+        pending = pending[i:]
+        if len(pending) < 14:
+            break                          # 半截帧，留到下个 chunk
+        payload = pending[1:13]
+        ms, a, b, c, d = struct.unpack("<IHHHH", payload)
+        if max(a, b, c, d) > 4095 or (sum(payload) & 0xFF) != pending[13]:
+            ascii_part += pending[:1]      # 校验失败＝误同步/坏帧，跳过这个 0xAA 重扫
+            pending = pending[1:]
+            continue
+        feed_frame(ms, a, b, c, d, buf)
+        pending = pending[14:]
+    while b"\n" in ascii_part:
+        line, ascii_part = ascii_part.split(b"\n", 1)
         feed_line(line.decode("utf-8", "ignore").strip(), buf)
-    return pending
+    return ascii_part + pending
 
 
 def reader(buf):  # 串口数据源（默认）
@@ -156,7 +188,7 @@ def reader(buf):  # 串口数据源（默认）
                     STATS["chunks"] += 1
                     STATS["bytes"] += len(chunk)
                     STATS["last_chunk"] = time.time()
-                    pending = split_chunks(pending + chunk, buf)
+                    pending = parse_chunk(pending + chunk, buf)
                 elif time.time() - STATS["last_chunk"] > 3.0:
                     STATS["stalls"] += 1
                     raise OSError("stall watchdog: reopen")
@@ -196,7 +228,7 @@ def ble_main(buf):
                         STATS["chunks"] += 1
                         STATS["bytes"] += len(data)
                         STATS["last_chunk"] = time.time()
-                        state["pending"] = split_chunks(state["pending"] + bytes(data), buf)
+                        state["pending"] = parse_chunk(state["pending"] + bytes(data), buf)
 
                     await client.start_notify(TX, on_notify)
                     while client.is_connected and time.time() - STATS["last_chunk"] < 5.0:
