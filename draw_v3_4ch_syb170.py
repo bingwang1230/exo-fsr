@@ -110,6 +110,9 @@ with schemdraw.Drawing(file="web/v3_4ch_syb170.png", dpi=130, show=False) as d:
     d += elm.Label().at((7.0, 1.0)).label(
         "红线 = 3V3 菊花链 ×4 ｜ 黄线 ×4 = 各中点 → D32/33/34/35 ｜ 深色线 = GND（全板共用最右列）",
         fontsize=10)
+    d += elm.Label().at((7.0, 0.3)).label(
+        "菊花链走线：中间列各插两根跳线，同列不同孔（如 6.6 行与 6.05 行）——同列即导通，一孔只插一头",
+        fontsize=10)
     d += elm.Label().at((7.5, 14.9)).label(
         "V3 前哨 · 4 通道 FSR 装配图（330Ω 上臂 / FSR 下臂 ×4，反逻辑）", fontsize=14)
     d += elm.Label().at((0.5, -0.6)).label(
