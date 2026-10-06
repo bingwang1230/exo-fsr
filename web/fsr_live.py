@@ -44,7 +44,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V3
 <span class="lbl" style="color:#3ecf6e">右跖 D35</span><span id="cur4" class="cur" style="color:#3ecf6e">--</span>
 <div id="clk"></div>
 <canvas id="cv" width="1200" height="400" style="width:99vw"></canvas>
-<div style="margin:8px 0"><button id="rec" onclick="toggleRec()" style="font-size:18px;padding:6px 24px;background:#a02020;color:#fff;border:none;border-radius:6px">● 录制</button> <span id="recinfo" style="color:#aaa"></span></div>
+<div style="margin:8px 0"><button id="rec" onclick="toggleRec()" style="font-size:18px;padding:6px 24px;background:#333;color:#fff;border:none;border-radius:6px">● 录制</button> <span id="recinfo" style="color:#aaa"></span></div>
 <div id="meta">连接中…</div>
 <script>
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
@@ -98,7 +98,9 @@ async function toggleRec(){
  recOn=!recOn;
  const r=await fetch(recOn?'/rec/start':'/rec/stop');
  const j=await r.json();
- document.getElementById('rec').style.background=recOn?'#a02020':'#333';
+ const b=document.getElementById('rec');
+ b.style.background=recOn?'#a02020':'#333';
+ b.textContent=recOn?'■ 停止录制':'● 录制';
  document.getElementById('recinfo').textContent=j.file||'';
 }
 setInterval(tick,300);tick();
