@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FSR live 波形页 v9（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
 
-运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/
+运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/（依赖在仓库 .venv：.venv/bin/python3，系统 python 无 bleak）
 - 数据格式（双格式自动兼容）：
   · ASCII 行 "毫秒数,值[,值…]"（USB / V2.x 旧固件；单/双/四通道均可，通道数自适应）；
   · 二进制帧 0xAA + struct('<IHHHH') + 校验和 1B = 14B（V3 前哨 4 通道 BLE：ms,左跟,左跖,右跟,右跖），
@@ -11,7 +11,8 @@
   断线/断流自动重扫重连。依赖：pip3 install bleak（串口另需 pyserial）。
 - 页面：四曲线滚动窗（左跟=橙 D32/左跖=金 D34/右跟=青 D33/右跖=绿 D35，跖位续 V2.6 配色）
   + 四路大号当前值 + 各路窗口 min/max + 实时数据率 + 实时钟联动（慢动作视频对齐用）。
-- 录制：页面按钮 → data/v2_*.csv，统一落 ASCII 行（ms,左跟,左跖,右跟,右跖）。
+- 录制：页面按钮 → data/v2_*.csv，统一落 ASCII 行（ms,左跟,左跖,右跟,右跖）；
+  UI 状态以 /rec/status 为唯一事实源（500ms 轮询），录制中右上角闪烁红点 REC 徽章（时长+样本数）。
 - 自身守护化（双 fork 脱离会话），异常写 /tmp/fsr_live.log。
 """
 
@@ -36,8 +37,14 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>FSR live · V3
 .cur{font-size:44px;font-weight:bold;margin-left:28px}
 .lbl{font-size:14px;color:#aaa;margin-left:28px}
 #clk{font-size:20px;color:#7ec8ff;font-family:monospace;margin:2px 0 6px}
-#meta{font-size:14px;color:#aaa;line-height:1.7}</style></head>
+#meta{font-size:14px;color:#aaa;line-height:1.7}
+#recbadge{position:fixed;top:12px;right:16px;display:none;align-items:center;gap:9px;
+ background:rgba(0,0,0,.55);border:1px solid #a02020;border-radius:18px;padding:6px 14px;
+ font:600 15px monospace;color:#ff6b6b;z-index:9;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+#recbadge .dot{width:12px;height:12px;border-radius:50%;background:#e33;animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}</style></head>
 <body>
+<div id="recbadge"><span class="dot"></span><span id="recbadge-txt">REC 00:00</span></div>
 <span class="lbl" style="color:#ff8c00">左跟 D32</span><span id="cur1" class="cur" style="color:#ff8c00">--</span>
 <span class="lbl" style="color:#ffd42a">左跖 D34</span><span id="cur2" class="cur" style="color:#ffd42a">--</span>
 <span class="lbl" style="color:#00bfff">右跟 D33</span><span id="cur3" class="cur" style="color:#00bfff">--</span>
@@ -93,15 +100,26 @@ async function tick(){
  }catch(e){document.getElementById('meta').textContent='服务未响应：'+e;}
  draw();
 }
-let recOn=false;
+let recOn=false,recStart=0;
+function fmtDur(s){const m=Math.floor(s/60),ss=Math.floor(s%60);
+ return String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0');}
+async function pollRec(){
+ try{const j=await(await fetch('/rec/status')).json();
+  recOn=j.recording;recStart=j.start||0;
+  const b=document.getElementById('rec'),bd=document.getElementById('recbadge');
+  b.style.background=recOn?'#a02020':'#333';
+  b.textContent=recOn?'■ 停止录制':'● 录制';
+  document.getElementById('recinfo').textContent=
+   recOn?((j.file||'').split('/').pop()+' 录制中'):
+   (j.file?('已存 '+(j.file||'').split('/').pop()+'（'+j.count+' 样本）'):'');
+  bd.style.display=recOn?'flex':'none';
+  if(recOn)document.getElementById('recbadge-txt').textContent=
+   'REC '+fmtDur(Date.now()/1000-recStart)+' · '+(j.count||0);
+ }catch(e){}}
+setInterval(pollRec,500);pollRec();
 async function toggleRec(){
- recOn=!recOn;
- const r=await fetch(recOn?'/rec/start':'/rec/stop');
- const j=await r.json();
- const b=document.getElementById('rec');
- b.style.background=recOn?'#a02020':'#333';
- b.textContent=recOn?'■ 停止录制':'● 录制';
- document.getElementById('recinfo').textContent=j.file||'';
+ try{await fetch(recOn?'/rec/stop':'/rec/start');}catch(e){}
+ pollRec();
 }
 setInterval(tick,300);tick();
 </script></body></html>"""
@@ -244,7 +262,7 @@ def ble_main(buf):
     asyncio.run(run())
 
 
-REC = {"file": None, "count": 0}
+REC = {"file": None, "count": 0, "start": 0.0, "last": None}
 
 
 def serve(buf):
@@ -257,7 +275,19 @@ def serve(buf):
                                         datetime.datetime.now().strftime("v2_%Y%m%d_%H%M%S.csv"))
                     REC["file"] = open(name, "w")
                     REC["count"] = 0
+                    REC["start"] = time.time()
                 body = json.dumps({"recording": True, "file": REC["file"].name}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+            elif self.path.startswith("/rec/status"):
+                if REC["file"] is not None:
+                    st = {"recording": True, "file": REC["file"].name,
+                          "count": REC["count"], "start": REC["start"]}
+                else:
+                    last = REC["last"] or {}
+                    st = {"recording": False, "file": last.get("file"),
+                          "count": last.get("count", 0), "start": 0}
+                body = json.dumps(st).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif self.path.startswith("/rec/stop"):
@@ -265,6 +295,8 @@ def serve(buf):
                     REC["file"].close()
                     n, name = REC["count"], REC["file"].name
                     REC["file"] = None
+                    REC["start"] = 0.0
+                    REC["last"] = {"file": name, "count": n}
                     body = json.dumps({"recording": False, "file": name, "samples": n}).encode()
                 else:
                     body = json.dumps({"recording": False, "file": None}).encode()
