@@ -59,8 +59,10 @@ with schemdraw.Drawing(file="web/v3_4ch_syb170.png", dpi=130, show=False) as d:
         d += elm.Line().at((xa, ya)).to((xb, yb))
     d += elm.Label().at((2.1, 4.35)).label("ESP32\nDevKit", fontsize=13)
 
-    y3v3, y32, y33, y34, y35, ygnd = 5.6, 5.2, 4.8, 4.4, 4.0, 3.2
-    for y, name in [(y3v3, "3V3"), (y32, "D32"), (y33, "D33"), (y34, "D34"), (y35, "D35"), (ygnd, "GND")]:
+    y3v3 = 5.6
+    # 引脚柱按用户实物丝印方向排（从下往上读）：D33, D32, D35, D34；3V3/GND 实板在别处，认丝印
+    stubs = [(5.2, "D33"), (4.8, "D32"), (4.4, "D35"), (4.0, "D34"), (3.2, "GND")]
+    for y, name in [(y3v3, "3V3")] + stubs:
         d += elm.Line().at((3.5, y)).to((4.0, y))
         d += elm.Label().at((3.95, y + 0.26)).label(name, fontsize=11)
 
@@ -75,16 +77,17 @@ with schemdraw.Drawing(file="web/v3_4ch_syb170.png", dpi=130, show=False) as d:
         d += elm.Dot().at((c3v[i], 6.6))
         d += elm.Dot().at((c3v[i], 7.15))
 
-    # ---- 中点黄线：四列各出一根，接到对应 ADC 引脚（低引脚配近列，互不交叉） ----
-    ch = [(0, y32, "D32 左跟"), (1, y33, "D33 右跟"), (2, y34, "D34 左跖"), (3, y35, "D35 右跖")]
-    for i, y, name in ch:
+    # ---- 中点黄线：四列各出一根，接到对应 ADC 引脚（最近列对最上脚，零交叉） ----
+    # 列通道分配随实物引脚序：cm[0]→D33 右跟、cm[1]→D32 左跟、cm[2]→D35 右跖、cm[3]→D34 左跖（固件映射不变）
+    ch = [(0, 5.2), (1, 4.8), (2, 4.4), (3, 4.0)]   # (中点列序号, 引脚柱 y)
+    for i, y in ch:
         d += elm.Line().at((cm[i], 6.05)).toy(y).color(YEL)
         d += elm.Line().at((cm[i], y)).tox(4.0).color(YEL)
         d += elm.Dot().at((cm[i], 6.05))
 
     # ---- GND 深蓝线：ESP32 → 最右列（y=3.2 最低，横穿无阻挡） ----
-    d += elm.Line().at((4.0, ygnd)).tox(cG).color(BLU)
-    d += elm.Line().at((cG, ygnd)).toy(7.7).color(BLU)
+    d += elm.Line().at((4.0, 3.2)).tox(cG).color(BLU)
+    d += elm.Line().at((cG, 3.2)).toy(7.7).color(BLU)
     d += elm.Dot().at((cG, 7.7))
 
     # ---- 330Ω ×4：上半区 7.15 行，各跨 3V3 列 → 中点列（腿弯紧；阻值标在通道2 下方） ----
@@ -95,8 +98,8 @@ with schemdraw.Drawing(file="web/v3_4ch_syb170.png", dpi=130, show=False) as d:
 
     # ---- FSR ×4：板上方错层（左通道最高、右通道最低 → 与各通道中点竖线零交叉） ----
     # 左端（中点侧）插各通道中点列顶行；右端共 GND 列（竖线上四个节点圆点）
-    fsr_y = [13.0, 11.6, 10.2, 8.8]   # ch0 左跟最高 … ch3 右跖最低（层距拉足，符号不压线）
-    fsr_names = ["FSR 左跟（D32）", "FSR 右跟（D33）", "FSR 左跖（D34）", "FSR 右跖（D35）"]
+    fsr_y = [13.0, 11.6, 10.2, 8.8]   # 随列序：右跟最高 … 左跖最低（层距拉足，符号不压线）
+    fsr_names = ["FSR 右跟（D33）", "FSR 左跟（D32）", "FSR 右跖（D35）", "FSR 左跖（D34）"]
     for i in range(4):
         d += elm.ResistorVar().endpoints((cm[i], fsr_y[i]), (cG, fsr_y[i])).label(
             fsr_names[i], loc="top", fontsize=11)
@@ -113,14 +116,18 @@ with schemdraw.Drawing(file="web/v3_4ch_syb170.png", dpi=130, show=False) as d:
     d += elm.Label().at((7.0, 0.3)).label(
         "菊花链走线：中间列各插两根跳线，同列不同孔（如 6.6 行与 6.05 行）——同列即导通，一孔只插一头",
         fontsize=10)
+    d += elm.Label().at((2.1, 6.6)).label("", fontsize=10)
+    d += elm.Label().at((7.0, -0.4)).label(
+        "引脚柱顺序 = 实物丝印反读方向（D33/D32/D35/D34）；3V3/GND 实板另侧，接线认丝印不认图位",
+        fontsize=10)
     d += elm.Label().at((7.5, 14.9)).label(
         "V3 前哨 · 4 通道 FSR 装配图（330Ω 上臂 / FSR 下臂 ×4，反逻辑）", fontsize=14)
-    d += elm.Label().at((0.5, -0.6)).label(
+    d += elm.Label().at((0.5, -1.5)).label(
         "三查：① 每通道三件同列才算通——330Ω 一脚与红线同列（3V3 列），另一脚与黄线同列（中点列），"
         "FSR 两脚分别在中点列与最右 GND 列——全部插上半区（SYB-170 上下两半互不导通！）", fontsize=11)
-    d += elm.Label().at((0.5, -1.35)).label(
+    d += elm.Label().at((0.5, -2.25)).label(
         "② 预检（逐通道指压）：空载稳定 ≈4095、指压对应通道下掉且其余三路不动＝通道通过；"
         "四路互串＝查中点列是否与邻列短路", fontsize=11)
-    d += elm.Label().at((0.5, -2.1)).label(
+    d += elm.Label().at((0.5, -3.0)).label(
         "③ 明晚上鞋：FSR 移到鞋内（左/右脚 · 跖骨头/脚跟四点），中点侧与 GND 侧各换 1m 杜邦延长；"
         "自热观察点照旧——静止站立 2-3 分钟看读数有无单向漂移", fontsize=11)
