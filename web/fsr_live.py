@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 v9（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
+"""FSR live 波形页 v9.2（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
 
 运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/（依赖在仓库 .venv：.venv/bin/python3，系统 python 无 bleak）
 - 数据格式（双格式自动兼容）：
@@ -139,12 +139,18 @@ RAW = collections.deque(maxlen=4)
 
 
 def feed_line(s, buf):
-    """ASCII 行 "ms,a[,b…]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘（原样行）。"""
+    """ASCII 行 "ms,a[,b…]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘。
+    2026-10-06 定案右脚 D33/D35 物理反接（视频地面真值），v9.2 起解析层对调：
+    4 通道时第 3/4 值互换后才入 buf/落盘，列序仍 ms,左跟,左跖,右跟,右跖（值已物理正确）；
+    历史数据（≤v2_20261006_112514）分析时需自行对调第 3/4 列。"""
     if len(RAW) == 0 or RAW[-1] != s:
         RAW.append(s[:60])
     parts = s.split(",")
     if len(parts) >= 2 and all(p.isdigit() for p in parts[1:]):
         vals = [int(p) for p in parts[1:]]
+        if len(vals) == 4:
+            vals[2], vals[3] = vals[3], vals[2]   # 右脚反接修正
+            s = ",".join([parts[0]] + [str(v) for v in vals])
         buf.append((time.time(), *vals))
         if REC["file"] is not None:
             REC["file"].write(s + "\n")
@@ -152,7 +158,9 @@ def feed_line(s, buf):
 
 
 def feed_frame(ms, lh, lm, rh, rm, buf):
+    """2026-10-06 定案右脚 D33/D35 物理反接（视频地面真值验证），此处对调后下游全部物理正确。"""
     """0xAA 二进制帧（V3 前哨 4ch BLE）→ buf + 录制统一落 ASCII 行。"""
+    rh, rm = rm, rh   # 右脚反接修正：帧内第3值实为右跖、第4值实为右跟
     buf.append((time.time(), lh, lm, rh, rm))
     if REC["file"] is not None:
         REC["file"].write(f"{ms},{lh},{lm},{rh},{rm}\n")
