@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 v9.2（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
+"""FSR live 波形页 v9.3（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
 
 运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/（依赖在仓库 .venv：.venv/bin/python3，系统 python 无 bleak）
 - 数据格式（双格式自动兼容）：
@@ -95,7 +95,7 @@ async function tick(){
   for(let c=1;c<=nch;c++){
    const vals=data.map(p=>p[c]);
    m+='｜'+NAMES[c]+' min='+Math.min(...vals)+' max='+Math.max(...vals);}
-  m+='（反逻辑：空载≈4095，受压下掉）';
+  m+='（正逻辑：空载≈0，受压上升）';
   document.getElementById('meta').textContent=m;
  }catch(e){document.getElementById('meta').textContent='服务未响应：'+e;}
  draw();
@@ -140,17 +140,13 @@ RAW = collections.deque(maxlen=4)
 
 def feed_line(s, buf):
     """ASCII 行 "ms,a[,b…]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘。
-    2026-10-06 定案右脚 D33/D35 物理反接（视频地面真值），v9.2 起解析层对调：
-    4 通道时第 3/4 值互换后才入 buf/落盘，列序仍 ms,左跟,左跖,右跟,右跖（值已物理正确）；
-    历史数据（≤v2_20261006_112514）分析时需自行对调第 3/4 列。"""
+    V3.1（10-07）重搭后：接线物理正确、正逻辑（空载≈0，受压上升），无需任何对调；
+    历史数据（≤20261006）为反逻辑+右脚反接：读数需 4095-x 反转、第 3/4 列对调。"""
     if len(RAW) == 0 or RAW[-1] != s:
         RAW.append(s[:60])
     parts = s.split(",")
     if len(parts) >= 2 and all(p.isdigit() for p in parts[1:]):
         vals = [int(p) for p in parts[1:]]
-        if len(vals) == 4:
-            vals[2], vals[3] = vals[3], vals[2]   # 右脚反接修正
-            s = ",".join([parts[0]] + [str(v) for v in vals])
         buf.append((time.time(), *vals))
         if REC["file"] is not None:
             REC["file"].write(s + "\n")
