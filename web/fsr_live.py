@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FSR live 波形页 v9.3（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
+"""FSR live 波形页 v9.4（serial / BLE 双源 · 四通道曲线 · 实时钟联动 + 录制）。
 
 运行：python3 fsr_live.py [--ble]  →  浏览器 http://localhost:8324/（依赖在仓库 .venv：.venv/bin/python3，系统 python 无 bleak）
 - 数据格式（双格式自动兼容）：
@@ -147,6 +147,9 @@ def feed_line(s, buf):
     parts = s.split(",")
     if len(parts) >= 2 and all(p.isdigit() for p in parts[1:]):
         vals = [int(p) for p in parts[1:]]
+        if len(vals) == 4:
+            vals[2], vals[3] = vals[3], vals[2]   # 右脚接线交叉修正（同 feed_frame）
+            s = ",".join([parts[0]] + [str(v) for v in vals])
         buf.append((time.time(), *vals))
         if REC["file"] is not None:
             REC["file"].write(s + "\n")
