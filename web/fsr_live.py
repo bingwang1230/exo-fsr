@@ -138,6 +138,31 @@ STATS = {"opens": 0, "chunks": 0, "bytes": 0, "stalls": 0, "last_chunk": 0.0}
 RAW = collections.deque(maxlen=4)
 
 
+class ChanFilter:
+    """中值5 + EMA(α=0.3)：专杀单点尖峰 + 压随机噪声。只用于显示；CSV 仍存原始值
+    （保真、历史可比、可重算——滤波不可逆，原始数据不能丢，2026-10-07）。"""
+    def __init__(self, n=4, alpha=0.3):
+        self.hist = [collections.deque(maxlen=5) for _ in range(n)]
+        self.ema = [None] * n
+        self.alpha = alpha
+
+    def __call__(self, vals):
+        out = []
+        for i, v in enumerate(vals):
+            h = self.hist[i]
+            h.append(v)
+            m = sorted(h)[len(h) // 2]
+            if self.ema[i] is None:
+                self.ema[i] = float(m)
+            else:
+                self.ema[i] = self.alpha * m + (1 - self.alpha) * self.ema[i]
+            out.append(int(round(self.ema[i])))
+        return out
+
+
+FILT = ChanFilter()
+
+
 def feed_line(s, buf):
     """ASCII 行 "ms,a[,b…]" → 进 buf（墙上时间戳 + 各通道值）+ 录制落盘。
     V3.1（10-07）重搭后：接线物理正确、正逻辑（空载≈0，受压上升），无需任何对调；
@@ -150,7 +175,7 @@ def feed_line(s, buf):
         if len(vals) == 4:
             vals = [vals[0], vals[2], vals[3], vals[1]]   # v9.6 三循环置换（同 feed_frame）
             s = ",".join([parts[0]] + [str(v) for v in vals])
-        buf.append((time.time(), *vals))
+        buf.append((time.time(), *FILT(vals)))   # 显示用滤波值；CSV 存原始
         if REC["file"] is not None:
             REC["file"].write(s + "\n")
             REC["count"] += 1
@@ -161,7 +186,8 @@ def feed_frame(ms, lh, lm, rh, rm, buf):
     """0xAA 二进制帧（V3 前哨 4ch BLE）→ buf + 录制统一落 ASCII 行。"""
     rh, rm = rm, rh   # 右脚反接修正：帧内第3值实为右跖、第4值实为右跟
     lh, lm, rh, rm = lh, rh, rm, lm   # v9.6 三循环置换：物理映射 左跖=col3 右跟=col4 右跖=col2
-    buf.append((time.time(), lh, lm, rh, rm))
+    vals = [lh, lm, rh, rm]
+    buf.append((time.time(), *FILT(vals)))   # 显示用滤波值；CSV 存原始
     if REC["file"] is not None:
         REC["file"].write(f"{ms},{lh},{lm},{rh},{rm}\n")
         REC["count"] += 1

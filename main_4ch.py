@@ -62,10 +62,18 @@ _advertise()
 
 # ---- 采样主循环（USB ASCII / BLE 二进制帧 双发）----
 FRAME_HDR = 0xAA
+OVERSAMPLE = 8    # 过采样：每点读 8 次平均，随机噪声 ÷√8，偶发 ADC 毛刺被稀释（2026-10-07）
+
+def read_avg(a):
+    s = 0
+    for _ in range(OVERSAMPLE):
+        s += a.read()
+    return s >> 3                     # OVERSAMPLE=8 → 移位平均，比 //8 快
+
 t0 = time.ticks_ms()
 while True:
     ms = time.ticks_diff(time.ticks_ms(), t0)
-    v = [a.read() for a in adcs]           # [左跟, 左跖, 右跟, 右跖]
+    v = [read_avg(a) for a in adcs]   # [左跟, 左跖, 右跟, 右跖]
     print(f"{ms},{v[0]},{v[1]},{v[2]},{v[3]}")     # 有线：USB 串口（ASCII 人读）
     if conn[0] >= 0:                       # 无线：连接态才 notify
         try:
