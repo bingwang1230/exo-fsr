@@ -10,6 +10,10 @@
 #   为什么不走 ASCII：4 通道 ASCII 行最长 28B 装不下默认 20B（V2.6 双通道 18B 是压线过的，10-03 拍板「先保可靠」）；
 #   fsr_live v9 双格式自动兼容。
 # 吞吐：100Hz × 13B ≈ 1.3KB/s，与 V2.6 同量级（BLE 连接态余量充足，AI 依协议惯例设定，待实测）。
+# LED 秒闪（V3 新增，2026-10-23）：D16(RX2) ←220Ω← LED →GND，与数据同一 ms 时钟对齐——
+#   每整秒亮 ~60ms（ms%1000<60），120fps 视频里≈7 帧，肉眼与逐帧都可见；
+#   视频帧里 LED 亮 ⟺ 数据行 ms%1000<60，这就是时钟同步锚点（帖④对齐的前提）。
+#   选脚 D16/D17（串口2·空闲，非 strapping）【AI 设定，待确认】；勿用 D12（最毒）与 21/22（留给 IMU）。
 
 import bluetooth
 import struct
@@ -60,7 +64,12 @@ def _advertise():
 ble.irq(_irq)   # 挂载顺序坑：必须在 def 之后（见 learn ch03 双坑笔记）
 _advertise()
 
-# ---- 采样主循环（USB ASCII / BLE 二进制帧 双发）----
+# ---- LED 秒闪标记（视频↔数据时钟对齐用）----
+LED_PIN = 16            # D16/RX2，串口2空闲脚；换脚改这里（避开 D12/21/22/32/33/34/35）
+LED_ON_MS = 60          # 每秒亮 60ms：占空比 6%，≈0.4mA 平均电流，电池无感
+led = Pin(LED_PIN, Pin.OUT)
+
+# ---- 采样主循环（USB ASCII / BLE 二进制帧 双发 + LED 秒闪）----
 FRAME_HDR = 0xAA
 OVERSAMPLE = 8    # 过采样：每点读 8 次平均，随机噪声 ÷√8，偶发 ADC 毛刺被稀释（2026-10-07）
 
@@ -73,6 +82,7 @@ def read_avg(a):
 t0 = time.ticks_ms()
 while True:
     ms = time.ticks_diff(time.ticks_ms(), t0)
+    led.value(1 if ms % 1000 < LED_ON_MS else 0)   # 非阻塞秒闪：整秒亮 60ms，不占采样节奏
     v = [read_avg(a) for a in adcs]   # [左跟, 左跖, 右跟, 右跖]
     print(f"{ms},{v[0]},{v[1]},{v[2]},{v[3]}")     # 有线：USB 串口（ASCII 人读）
     if conn[0] >= 0:                       # 无线：连接态才 notify
